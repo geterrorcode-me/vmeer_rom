@@ -25,85 +25,86 @@ jobs:
           set -e
           mkdir -p merged_work final_rootfs
 
-          # 1. Ambil Base Redroid dari Docker Hub (Solusi Link 404)
+          # 1. Pull Base Redroid
           echo "Pulling Redroid Docker image..."
           docker pull redroid/redroid:13.0.0-latest
           
-          # 2. Export rootfs dari Docker ke tar
-          echo "Exporting Docker container to TAR..."
+          # 2. Export rootfs
+          echo "Exporting Docker container..."
           CID=$(docker create redroid/redroid:13.0.0-latest)
           docker export $CID -o redroid-base.tar
           docker rm $CID
           
-          # 3. Extract tar ke merged_work (Abaikan folder runtime)
-          echo "Extracting TAR..."
+          # 3. Extract & Move
+          echo "Extracting and Moving files..."
           tar xf redroid-base.tar -C merged_work/ --exclude=dev --exclude=proc --exclude=sys
-
-           # --- TAMBAHKAN INI: Pindahkan isi dari merged_work ke final_rootfs ---
-           echo "Moving files to final_rootfs..."
-           cp -a merged_work/* final_rootfs/
-
-          # 3. Injeksi NinjaVM Blobs (Driver Mesa & GPU)
+          cp -a merged_work/* final_rootfs/
+          
+          # 4. Injeksi NinjaVM Blobs (Jika ada)
           if [ -d "blobs/vendor" ]; then
+            echo "Injecting Blobs..."
+            mkdir -p final_rootfs/vendor
             cp -a blobs/vendor/* final_rootfs/vendor/
           fi
 
-          # 4. Injeksi Init vMeer (Custom Boot Script)
-          cp init.vmeer.rc final_rootfs/init.rc
+          # 5. Injeksi Init vMeer
+          if [ -f "init.vmeer.rc" ]; then
+            cp init.vmeer.rc final_rootfs/init.rc
+          else
+            echo "WARNING: init.vmeer.rc not found in repo root!"
+          fi
 
-          # Cek dulu lokasinya ada dimana
+          # 6. Tweak build.prop
+          # Cek lokasi build.prop (A13 bisa di /system/etc atau /system)
           BUILD_PROP_PATH="final_rootfs/system/etc/build.prop"
           [ ! -f "$BUILD_PROP_PATH" ] && BUILD_PROP_PATH="final_rootfs/system/build.prop"
 
-          # 5. Tweak build.prop untuk High-Performance Container
+          echo "Tweaking $BUILD_PROP_PATH"
           cat >> $BUILD_PROP_PATH <<EOT
           # vMeer Optimized Props
           vmeer.container.mode=1
           ro.config.low_ram=true
           ro.sf.lcd_density=160
           persist.sys.vmeer.bypass=1
-          
-          # Mesa & Virtio-GPU Config
           ro.hardware.egl=mesa
           ro.hardware.gralloc=minigbm
           ro.hardware.hwcomposer=virtio_gpu
           ro.hardware.vulkan=virtio
           ro.opengles.version=196609
           debug.sf.enable_hwc_vds=0
-          
-          # Debugging
           persist.sys.usb.config=adb
           ro.debuggable=1
           EOT
 
-          # 6. SELinux & Symlink Fix
-          # Pastikan vendor bisa diakses via /vendor
+          # 7. SELinux & Symlink Fix
           ln -sf /system/vendor final_rootfs/vendor
           
-          # Relabeling (Jika file_contexts tersedia)
           if [ -f merged_work/file_contexts.bin ]; then
             cp merged_work/file_contexts.bin final_rootfs/
-            setfiles -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
+            setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
           fi
 
-          # 7. VINTF & Permission Fix
-          mkdir -p final_rootfs/vendor/etc/vintf/manifest
-          [ -d "blobs/vendor/etc/vintf/manifest" ] && cp blobs/vendor/etc/vintf/manifest/*.xml final_rootfs/vendor/etc/vintf/manifest/
-          
+          # 8. Fix Permissions (Solusi Dangling Symlink)
+          echo "Applying Permissions..."
           chown -R root:root final_rootfs/
-          chmod 755 final_rootfs/system/bin/*
+          # Menggunakan find untuk menghindari error pada symlink linker
+          find final_rootfs/system/bin -type f -exec chmod 755 {} +
+          [ -d "final_rootfs/system/xbin" ] && find final_rootfs/system/xbin -type f -exec chmod 755 {} + || true
           chmod 644 $BUILD_PROP_PATH
+          
+          # Pastikan folder penting lainnya ada
+          mkdir -p final_rootfs/data final_rootfs/dev final_rootfs/proc final_rootfs/sys
           EOF
 
       - name: Build Readonly Image (SquashFS)
         run: |
+          # Gunakan -all-root untuk memastikan owner adalah root di dalam image
           sudo mksquashfs final_rootfs/ readonly.bin \
             -comp zstd -Xcompression-level 22 \
             -no-xattrs -noappend -all-root
 
-      - name: Upload vMeer Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: vMeer-Readonly-${{ github.event.inputs.target_arch }}
           path: readonly.bin
-          
