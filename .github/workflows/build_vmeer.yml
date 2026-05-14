@@ -47,6 +47,10 @@ jobs:
           # 4. Injeksi Init vMeer (Custom Boot Script)
           cp init.vmeer.rc final_rootfs/init.rc
 
+          # Cek dulu lokasinya ada dimana
+          BUILD_PROP_PATH="final_rootfs/system/etc/build.prop"
+          [ ! -f "$BUILD_PROP_PATH" ] && BUILD_PROP_PATH="final_rootfs/system/build.prop"
+
           # 5. Tweak build.prop untuk High-Performance Container
           cat >> final_rootfs/system/etc/build.prop <<EOT
           # vMeer Optimized Props
