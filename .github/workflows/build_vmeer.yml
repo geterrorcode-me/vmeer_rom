@@ -39,6 +39,10 @@ jobs:
           echo "Extracting TAR..."
           tar xf redroid-base.tar -C merged_work/ --exclude=dev --exclude=proc --exclude=sys
 
+           # --- TAMBAHKAN INI: Pindahkan isi dari merged_work ke final_rootfs ---
+           echo "Moving files to final_rootfs..."
+           cp -a merged_work/* final_rootfs/
+
           # 3. Injeksi NinjaVM Blobs (Driver Mesa & GPU)
           if [ -d "blobs/vendor" ]; then
             cp -a blobs/vendor/* final_rootfs/vendor/
