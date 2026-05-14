@@ -52,7 +52,7 @@ jobs:
           [ ! -f "$BUILD_PROP_PATH" ] && BUILD_PROP_PATH="final_rootfs/system/build.prop"
 
           # 5. Tweak build.prop untuk High-Performance Container
-          cat >> final_rootfs/system/etc/build.prop <<EOT
+          cat >> $BUILD_PROP_PATH <<EOT
           # vMeer Optimized Props
           vmeer.container.mode=1
           ro.config.low_ram=true
@@ -88,7 +88,7 @@ jobs:
           
           chown -R root:root final_rootfs/
           chmod 755 final_rootfs/system/bin/*
-          chmod 644 final_rootfs/system/etc/build.prop
+          chmod 644 $BUILD_PROP_PATH
           EOF
 
       - name: Build Readonly Image (SquashFS)
