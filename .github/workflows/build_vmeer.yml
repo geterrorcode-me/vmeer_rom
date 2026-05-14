@@ -48,7 +48,7 @@ jobs:
           cp init.vmeer.rc final_rootfs/init.rc
 
           # 5. Tweak build.prop untuk High-Performance Container
-          cat >> final_rootfs/system/build.prop <<EOT
+          cat >> final_rootfs/system/etc/build.prop <<EOT
           # vMeer Optimized Props
           vmeer.container.mode=1
           ro.config.low_ram=true
@@ -84,7 +84,7 @@ jobs:
           
           chown -R root:root final_rootfs/
           chmod 755 final_rootfs/system/bin/*
-          chmod 644 final_rootfs/system/build.prop
+          chmod 644 final_rootfs/system/etc/build.prop
           EOF
 
       - name: Build Readonly Image (SquashFS)
