@@ -1,0 +1,97 @@
+name: vMeer Readonly Build System
+on:
+  workflow_dispatch:
+    inputs:
+      target_arch:
+        description: 'Target Architecture'
+        default: 'arm64'
+        required: true
+
+jobs:
+  assemble-vmeer:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y squashfs-tools erofs-utils simg2img wget curl tar xz-utils setools
+
+      - name: Assemble Rootfs Structure
+        run: |
+          sudo bash << 'EOF'
+          set -e
+          mkdir -p merged_work final_rootfs
+
+          # 1. Ambil Base Redroid (Pondasi Utama)
+          echo "Downloading Redroid Base..."
+          wget -q https://github.com/remote-android/redroid-doc/releases/download/v1.0.0/redroid-13-arm64.tar.xz
+          tar xf redroid-13-arm64.tar.xz -C merged_work/
+          
+          # 2. Flattening: Pindahkan system & vendor ke satu root
+          cp -a merged_work/system/* final_rootfs/
+          mkdir -p final_rootfs/vendor
+          cp -a merged_work/vendor/* final_rootfs/vendor/
+
+          # 3. Injeksi NinjaVM Blobs (Driver Mesa & GPU)
+          if [ -d "blobs/vendor" ]; then
+            cp -a blobs/vendor/* final_rootfs/vendor/
+          fi
+
+          # 4. Injeksi Init vMeer (Custom Boot Script)
+          cp init.vmeer.rc final_rootfs/init.rc
+
+          # 5. Tweak build.prop untuk High-Performance Container
+          cat >> final_rootfs/system/build.prop <<EOT
+          # vMeer Optimized Props
+          vmeer.container.mode=1
+          ro.config.low_ram=true
+          ro.sf.lcd_density=160
+          persist.sys.vmeer.bypass=1
+          
+          # Mesa & Virtio-GPU Config
+          ro.hardware.egl=mesa
+          ro.hardware.gralloc=minigbm
+          ro.hardware.hwcomposer=virtio_gpu
+          ro.hardware.vulkan=virtio
+          ro.opengles.version=196609
+          debug.sf.enable_hwc_vds=0
+          
+          # Debugging
+          persist.sys.usb.config=adb
+          ro.debuggable=1
+          EOT
+
+          # 6. SELinux & Symlink Fix
+          # Pastikan vendor bisa diakses via /vendor
+          ln -sf /system/vendor final_rootfs/vendor
+          
+          # Relabeling (Jika file_contexts tersedia)
+          if [ -f merged_work/file_contexts.bin ]; then
+            cp merged_work/file_contexts.bin final_rootfs/
+            setfiles -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
+          fi
+
+          # 7. VINTF & Permission Fix
+          mkdir -p final_rootfs/vendor/etc/vintf/manifest
+          [ -d "blobs/vendor/etc/vintf/manifest" ] && cp blobs/vendor/etc/vintf/manifest/*.xml final_rootfs/vendor/etc/vintf/manifest/
+          
+          chown -R root:root final_rootfs/
+          chmod 755 final_rootfs/system/bin/*
+          chmod 644 final_rootfs/system/build.prop
+          EOF
+
+      - name: Build Readonly Image (SquashFS)
+        run: |
+          sudo mksquashfs final_rootfs/ readonly.bin \
+            -comp zstd -Xcompression-level 22 \
+            -no-xattrs -noappend -all-root
+
+      - name: Upload vMeer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-Readonly-${{ github.event.inputs.target_arch }}
+          path: readonly.bin
+          
