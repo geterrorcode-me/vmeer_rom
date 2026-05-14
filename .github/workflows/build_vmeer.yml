@@ -25,15 +25,19 @@ jobs:
           set -e
           mkdir -p merged_work final_rootfs
 
-          # 1. Ambil Base Redroid (Pondasi Utama)
-          echo "Downloading Redroid Base..."
-          wget -q https://github.com/remote-android/redroid-doc/releases/download/v1.0.0/redroid-13-arm64.tar.xz
-          tar xf redroid-13-arm64.tar.xz -C merged_work/
+          # 1. Ambil Base Redroid dari Docker Hub (Solusi Link 404)
+          echo "Pulling Redroid Docker image..."
+          docker pull redroid/redroid:13.0.0-latest
           
-          # 2. Flattening: Pindahkan system & vendor ke satu root
-          cp -a merged_work/system/* final_rootfs/
-          mkdir -p final_rootfs/vendor
-          cp -a merged_work/vendor/* final_rootfs/vendor/
+          # 2. Export rootfs dari Docker ke tar
+          echo "Exporting Docker container to TAR..."
+          CID=$(docker create redroid/redroid:13.0.0-latest)
+          docker export $CID -o redroid-base.tar
+          docker rm $CID
+          
+          # 3. Extract tar ke merged_work (Abaikan folder runtime)
+          echo "Extracting TAR..."
+          tar xf redroid-base.tar -C merged_work/ --exclude=dev --exclude=proc --exclude=sys
 
           # 3. Injeksi NinjaVM Blobs (Driver Mesa & GPU)
           if [ -d "blobs/vendor" ]; then
