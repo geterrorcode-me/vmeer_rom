@@ -1,4 +1,4 @@
-name: vMeer Readonly CHMOD Build System
+name: vMeer Readonly chmod Build System
 on:
   workflow_dispatch:
     inputs:
@@ -92,24 +92,28 @@ jobs:
           # Pastikan seluruh struktur folder mutlak dimiliki oleh root
           chown -R root:root final_rootfs/
 
-          # Izin dasar untuk direktori biner dan pustaka sistem
+          # Izin dasar untuk direktori biner dan pustaka sistem (Aman untuk 64-bit murni)
           find final_rootfs/system/bin -type d -exec chmod 755 {} +
           find final_rootfs/system/etc -type d -exec chmod 755 {} +
-          find final_rootfs/system/lib -type d -exec chmod 755 {} +
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type d -exec chmod 755 {} + || true
           find final_rootfs/system/lib64 -type d -exec chmod 755 {} +
 
           # Kunci seluruh executable biner termasuk runner binfmt_misc arm64
           find final_rootfs/system/bin -type f -exec chmod 755 {} +
-          chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
+          if [ -f "final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64" ]; then
+            chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
+          fi
 
           # Mengunci berkas konfigurasi agar tidak ditolak oleh init (Keamanan Ketat)
           find final_rootfs/system/etc/init -type f -exec chmod 644 {} +
           find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} +
-          chmod 644 final_rootfs/system/etc/init/ndk_translation.rc
+          if [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ]; then
+            chmod 644 final_rootfs/system/etc/init/ndk_translation.rc
+          fi
           chmod 644 $BUILD_PROP_PATH
 
-          # Mengunci seluruh pustaka bersama (.so) dan modul emulasi biner
-          find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} +
+          # Mengunci seluruh pustaka bersama (.so) dan modul emulasi biner (Pengecekan bersyarat)
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} + || true
           find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} +
           
           # Pembuatan folder runtime dasar
