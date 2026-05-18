@@ -1,4 +1,4 @@
-name: vMeer Readonly Build System
+name: vMeer Readonly Apex Build System
 on:
   workflow_dispatch:
     inputs:
