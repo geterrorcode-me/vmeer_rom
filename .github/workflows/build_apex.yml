@@ -1,4 +1,4 @@
-name: vMeer Readonly Apex Build System
+name: vMeer Readonly Build System
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +18,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y squashfs-tools erofs-utils simg2img wget curl tar xz-utils setools p7zip-full
+          # Mengaktifkan dukungan emulasi multi-arsitektur agar ekstraksi file ARM64 berjalan aman
           sudo apt install -y qemu-user-static
           sudo binfmt-support --start || true
 
@@ -85,49 +86,70 @@ jobs:
             setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
           fi
 
-          # 7.5. Runtime Framework Symlink Fix (Menangani Warning missing .jar pada Android 13 Apex)
-          echo "Generating APEX Framework Symlinks for vMeer Engine VFS..."
+          # 7.5. Runtime Framework Hard-Copy Fix (Mengatasi Patah Tautan APEX pada RomFS Parser)
+          echo "Injecting physical Java Framework jars into conventional system path..."
           mkdir -p final_rootfs/system/framework
           
-          # Membuat mapping tautan aman dari APEX Runtime ke Framework konvensional
-          # Hal ini memicu VFS Engine untuk mendeteksi kesiapan berkas jar inti sistem
           JAR_FILES=("core-oj.jar" "core-libart.jar" "ext.jar" "framework.jar" "services.jar")
           for jar in "${JAR_FILES[@]}"; do
-            if [ ! -f "final_rootfs/system/framework/$jar" ]; then
-              # Jika di build host tidak ada, pasang tautan relatif agar saat runtime terbaca aman melalui engine VFS
-              ln -sf /apex/com.android.art/javalib/$jar final_rootfs/system/framework/$jar || true
+            # Lacak lokasi berkas .jar nyata di dalam folder apex hasil ekstraksi docker
+            REAL_JAR_PATH=$(find final_rootfs/apex/ -type f -name "$jar" -print -quit 2>/dev/null || true)
+            
+            if [ -n "$REAL_JAR_PATH" ] && [ -f "$REAL_JAR_PATH" ]; then
+              echo "Found $jar at $REAL_JAR_PATH. Copying to framework path..."
+              cp -f "$REAL_JAR_PATH" "final_rootfs/system/framework/$jar"
+            else
+              # Pencarian sekunder jika berada di subfolder lain
+              BACKUP_JAR_PATH=$(find final_rootfs/ -type f -name "$jar" -print -quit 2>/dev/null || true)
+              if [ -n "$BACKUP_JAR_PATH" ] && [ -f "$BACKUP_JAR_PATH" ] && [ "$BACKUP_JAR_PATH" != "final_rootfs/system/framework/$jar" ]; then
+                echo "Found $jar via backup strategy at $BACKUP_JAR_PATH. Copying..."
+                cp -f "$BACKUP_JAR_PATH" "final_rootfs/system/framework/$jar"
+              else
+                echo "WARNING: Physical jar $jar not found! Creating fallback placeholder for VFS inode table."
+                touch "final_rootfs/system/framework/$jar"
+              fi
             fi
           done
 
           # 8. Penegakan Hak Akses Sistem (Aman dari folder yang hilang)
           echo "Applying Strict Android Permissions..."
+          
+          # Pastikan seluruh struktur folder mutlak dimiliki oleh root sebelum kompilasi SquashFS
           chown -R root:root final_rootfs/
 
+          # Izin dasar untuk direktori utama sistem
           [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type d -exec chmod 755 {} + || true
           [ -d "final_rootfs/system/etc" ] && find final_rootfs/system/etc -type d -exec chmod 755 {} + || true
           [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type d -exec chmod 755 {} + || true
           [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type d -exec chmod 755 {} + || true
           [ -d "final_rootfs/system/framework" ] && find final_rootfs/system/framework -type d -exec chmod 755 {} + || true
 
+          # Kunci seluruh executable biner yang ada di system/bin
           [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type f -exec chmod 755 {} + || true
           if [ -f "final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64" ]; then
             chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
           fi
 
+          # Mengunci berkas konfigurasi di dalam etc/init jika eksis
           if [ -d "final_rootfs/system/etc/init" ]; then
             find final_rootfs/system/etc/init -type f -exec chmod 644 {} + || true
             [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ] && chmod 644 final_rootfs/system/etc/init/ndk_translation.rc || true
           fi
           
+          # Mengunci berkas binfmt_misc jika direktori eksis
           if [ -d "final_rootfs/system/etc/binfmt_misc" ]; then
             find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} + || true
           fi
           
+          # Amankan berkas prop sistem dan berkas jar yang baru disalin
           chmod 644 $BUILD_PROP_PATH
+          [ -d "final_rootfs/system/framework" ] && find final_rootfs/system/framework -type f -exec chmod 644 {} + || true
 
+          # Mengunci seluruh pustaka bersama (.so) secara kondisional
           [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} + || true
           [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} + || true
           
+          # Pembuatan folder runtime dasar
           mkdir -p final_rootfs/data final_rootfs/dev final_rootfs/proc final_rootfs/sys
           EOF
 
