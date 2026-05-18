@@ -1,0 +1,144 @@
+name: vMeer Readonly Build System
+on:
+  workflow_dispatch:
+    inputs:
+      target_arch:
+        description: 'Target Architecture'
+        default: 'arm64'
+        required: true
+
+jobs:
+  assemble-vmeer:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y squashfs-tools erofs-utils simg2img wget curl tar xz-utils setools p7zip-full
+          sudo apt install -y qemu-user-static
+          sudo binfmt-support --start || true
+
+      - name: Assemble Rootfs Structure
+        run: |
+          sudo bash << 'EOF'
+          set -e
+          mkdir -p merged_work final_rootfs
+
+          # 1. Pull Base Redroid ARM64 murni 64-bit untuk kecocokan hardware modern
+          echo "Pulling Redroid ARM64 64-bit Only Docker image..."
+          docker pull --platform linux/arm64 redroid/redroid:13.0.0_64only-latest
+          
+          # 2. Export rootfs
+          echo "Exporting Docker container..."
+          CID=$(docker create --platform linux/arm64 redroid/redroid:13.0.0_64only-latest)
+          docker export $CID -o redroid-base.tar
+          docker rm $CID
+          
+          # 3. Extract & Move
+          echo "Extracting and Moving files..."
+          tar xf redroid-base.tar -C merged_work/ --exclude=dev --exclude=proc --exclude=sys
+          cp -a merged_work/* final_rootfs/
+          
+          # 4. Injeksi NinjaVM Blobs (Jika ada)
+          if [ -d "blobs/vendor" ]; then
+            echo "Injecting Blobs..."
+            mkdir -p final_rootfs/vendor
+            cp -a blobs/vendor/* final_rootfs/vendor/
+          fi
+
+          # 5. Injeksi Init vMeer
+          if [ -f "init.vmeer.rc" ]; then
+            cp init.vmeer.rc final_rootfs/init.rc
+          else
+            echo "WARNING: init.vmeer.rc not found in repo root!"
+          fi
+
+          # 6. Tweak build.prop
+          BUILD_PROP_PATH="final_rootfs/system/etc/build.prop"
+          [ ! -f "$BUILD_PROP_PATH" ] && BUILD_PROP_PATH="final_rootfs/system/build.prop"
+
+          echo "Tweaking $BUILD_PROP_PATH"
+          cat >> $BUILD_PROP_PATH <<EOT
+          # vMeer Optimized Props
+          vmeer.container.mode=1
+          ro.config.low_ram=true
+          ro.sf.lcd_density=160
+          persist.sys.vmeer.bypass=1
+          ro.hardware.egl=mesa
+          ro.hardware.gralloc=minigbm
+          ro.hardware.hwcomposer=virtio_gpu
+          ro.hardware.vulkan=virtio
+          ro.opengles.version=196609
+          debug.sf.enable_hwc_vds=0
+          persist.sys.usb.config=adb
+          ro.debuggable=1
+          EOT
+
+          # 7. SELinux & Symlink Fix
+          ln -sf /system/vendor final_rootfs/vendor
+          
+          if [ -f merged_work/file_contexts.bin ]; then
+            cp merged_work/file_contexts.bin final_rootfs/
+            setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
+          fi
+
+          # 7.5. Runtime Framework Symlink Fix (Menangani Warning missing .jar pada Android 13 Apex)
+          echo "Generating APEX Framework Symlinks for vMeer Engine VFS..."
+          mkdir -p final_rootfs/system/framework
+          
+          # Membuat mapping tautan aman dari APEX Runtime ke Framework konvensional
+          # Hal ini memicu VFS Engine untuk mendeteksi kesiapan berkas jar inti sistem
+          JAR_FILES=("core-oj.jar" "core-libart.jar" "ext.jar" "framework.jar" "services.jar")
+          for jar in "${JAR_FILES[@]}"; do
+            if [ ! -f "final_rootfs/system/framework/$jar" ]; then
+              # Jika di build host tidak ada, pasang tautan relatif agar saat runtime terbaca aman melalui engine VFS
+              ln -sf /apex/com.android.art/javalib/$jar final_rootfs/system/framework/$jar || true
+            fi
+          done
+
+          # 8. Penegakan Hak Akses Sistem (Aman dari folder yang hilang)
+          echo "Applying Strict Android Permissions..."
+          chown -R root:root final_rootfs/
+
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/etc" ] && find final_rootfs/system/etc -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/framework" ] && find final_rootfs/system/framework -type d -exec chmod 755 {} + || true
+
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type f -exec chmod 755 {} + || true
+          if [ -f "final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64" ]; then
+            chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
+          fi
+
+          if [ -d "final_rootfs/system/etc/init" ]; then
+            find final_rootfs/system/etc/init -type f -exec chmod 644 {} + || true
+            [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ] && chmod 644 final_rootfs/system/etc/init/ndk_translation.rc || true
+          fi
+          
+          if [ -d "final_rootfs/system/etc/binfmt_misc" ]; then
+            find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} + || true
+          fi
+          
+          chmod 644 $BUILD_PROP_PATH
+
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} + || true
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} + || true
+          
+          mkdir -p final_rootfs/data final_rootfs/dev final_rootfs/proc final_rootfs/sys
+          EOF
+
+      - name: Build Readonly Image (SquashFS)
+        run: |
+          sudo mksquashfs final_rootfs/ readonly.bin \
+            -comp zstd -Xcompression-level 22 \
+            -no-xattrs -noappend -all-root
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-Readonly-${{ github.event.inputs.target_arch }}
+          path: readonly.bin
