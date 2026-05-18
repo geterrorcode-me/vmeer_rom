@@ -1,4 +1,4 @@
-name: vMeer Readonly chmod Build System
+name: vMeer Readonly Build System
 on:
   workflow_dispatch:
     inputs:
@@ -86,35 +86,41 @@ jobs:
             setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
           fi
 
-          # 8. Penegakan Hak Akses Sistem & Komponen ndk_translation Bawaan
+          # 8. Penegakan Hak Akses Sistem (Aman dari folder yang hilang)
           echo "Applying Strict Android Permissions..."
           
           # Pastikan seluruh struktur folder mutlak dimiliki oleh root
           chown -R root:root final_rootfs/
 
-          # Izin dasar untuk direktori biner dan pustaka sistem (Aman untuk 64-bit murni)
-          find final_rootfs/system/bin -type d -exec chmod 755 {} +
-          find final_rootfs/system/etc -type d -exec chmod 755 {} +
+          # Izin dasar untuk direktori utama sistem (Gunakan pemeriksaan eksistensi folder)
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/etc" ] && find final_rootfs/system/etc -type d -exec chmod 755 {} + || true
           [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type d -exec chmod 755 {} + || true
-          find final_rootfs/system/lib64 -type d -exec chmod 755 {} +
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type d -exec chmod 755 {} + || true
 
-          # Kunci seluruh executable biner termasuk runner binfmt_misc arm64
-          find final_rootfs/system/bin -type f -exec chmod 755 {} +
+          # Kunci seluruh executable biner yang ada di system/bin
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type f -exec chmod 755 {} + || true
           if [ -f "final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64" ]; then
             chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
           fi
 
-          # Mengunci berkas konfigurasi agar tidak ditolak oleh init (Keamanan Ketat)
-          find final_rootfs/system/etc/init -type f -exec chmod 644 {} +
-          find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} +
-          if [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ]; then
-            chmod 644 final_rootfs/system/etc/init/ndk_translation.rc
+          # Mengunci berkas konfigurasi di dalam etc/init jika eksis
+          if [ -d "final_rootfs/system/etc/init" ]; then
+            find final_rootfs/system/etc/init -type f -exec chmod 644 {} + || true
+            [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ] && chmod 644 final_rootfs/system/etc/init/ndk_translation.rc || true
           fi
+          
+          # Mengunci berkas binfmt_misc jika direktori eksis
+          if [ -d "final_rootfs/system/etc/binfmt_misc" ]; then
+            find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} + || true
+          fi
+          
+          # Amankan build.prop target
           chmod 644 $BUILD_PROP_PATH
 
-          # Mengunci seluruh pustaka bersama (.so) dan modul emulasi biner (Pengecekan bersyarat)
+          # Mengunci seluruh pustaka bersama (.so) secara kondisional
           [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} + || true
-          find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} +
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} + || true
           
           # Pembuatan folder runtime dasar
           mkdir -p final_rootfs/data final_rootfs/dev final_rootfs/proc final_rootfs/sys
