@@ -68,11 +68,10 @@ jobs:
           ro.config.low_ram=true
           ro.sf.lcd_density=160
           persist.sys.vmeer.bypass=1
-          ro.hardware.egl=mesa
-          ro.hardware.gralloc=minigbm
-          ro.hardware.hwcomposer=virtio_gpu
-          ro.hardware.vulkan=virtio
-          ro.opengles.version=196609
+          ro.hardware.egl=adreno
+          ro.hardware.vulkan=adreno
+          debug.hwui.renderer=skiagl
+          ro.opengles.version=196610
           debug.sf.enable_hwc_vds=0
           persist.sys.usb.config=adb
           ro.debuggable=1
