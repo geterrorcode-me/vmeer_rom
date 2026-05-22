@@ -1,0 +1,228 @@
+name: vMeer Readonly SB Build System
+on:
+  workflow_dispatch:
+    inputs:
+      target_arch:
+        description: 'Target Architecture'
+        default: 'arm64'
+        required: true
+
+jobs:
+  assemble-vmeer:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y squashfs-tools erofs-utils simg2img wget curl tar xz-utils setools p7zip-full python3
+          # Mengaktifkan dukungan emulasi multi-arsitektur agar ekstraksi file ARM64 berjalan aman
+          sudo apt install -y qemu-user-static
+          sudo binfmt-support --start || true
+
+      - name: Assemble Rootfs Structure
+        run: |
+          sudo bash << 'EOF'
+          set -e
+          mkdir -p merged_work final_rootfs
+
+          # 1. Pull Base Redroid ARM64 murni 64-bit untuk kecocokan hardware modern
+          echo "Pulling Redroid ARM64 64-bit Only Docker image..."
+          docker pull --platform linux/arm64 redroid/redroid:13.0.0_64only-latest
+          
+          # 2. Export rootfs
+          echo "Exporting Docker container..."
+          CID=$(docker create --platform linux/arm64 redroid/redroid:13.0.0_64only-latest)
+          docker export $CID -o redroid-base.tar
+          docker rm $CID
+          
+          # 3. Extract & Move
+          echo "Extracting and Moving files..."
+          tar xf redroid-base.tar -C merged_work/ --exclude=dev --exclude=proc --exclude=sys
+          cp -a merged_work/* final_rootfs/
+          
+          # 4. Injeksi NinjaVM Blobs (Jika ada)
+          if [ -d "blobs/vendor" ]; then
+            echo "Injecting Blobs..."
+            mkdir -p final_rootfs/vendor
+            cp -a blobs/vendor/* final_rootfs/vendor/
+          fi
+
+          # 5. Injeksi Init vMeer
+          if [ -f "init.vmeer.rc" ]; then
+            cp init.vmeer.rc final_rootfs/init.rc
+          else
+            echo "WARNING: init.vmeer.rc not found in repo root!"
+          fi
+
+          # 6. Tweak build.prop (Menggunakan passthrough GPU Host handal & OpenGL ES modern)
+          BUILD_PROP_PATH="final_rootfs/system/etc/build.prop"
+          [ ! -f "$BUILD_PROP_PATH" ] && BUILD_PROP_PATH="final_rootfs/system/build.prop"
+
+          echo "Tweaking $BUILD_PROP_PATH"
+          cat >> $BUILD_PROP_PATH <<EOT
+          # vMeer Optimized Passthrough Properties
+          vmeer.container.mode=1
+          ro.config.low_ram=true
+          ro.sf.lcd_density=160
+          persist.sys.vmeer.bypass=1
+          ro.hardware.egl=adreno
+          ro.hardware.vulkan=adreno
+          debug.hwui.renderer=skiagl
+          ro.opengles.version=196610
+          debug.sf.enable_hwc_vds=0
+          persist.sys.usb.config=adb
+          ro.debuggable=1
+          EOT
+
+          # 7. SELinux & Symlink Fix
+          ln -sf /system/vendor final_rootfs/vendor
+          
+          if [ -f merged_work/file_contexts.bin ]; then
+            cp merged_work/file_contexts.bin final_rootfs/
+            setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
+          fi
+
+          # 7.5. Runtime Framework Hard-Copy Fix (Mengatasi Patah Tautan APEX pada RomFS Parser)
+          echo "Injecting physical Java Framework jars into conventional system path..."
+          mkdir -p final_rootfs/system/framework
+          
+          JAR_FILES=("core-oj.jar" "core-libart.jar" "ext.jar" "framework.jar" "services.jar")
+          for jar in "${JAR_FILES[@]}"; do
+            # Lacak lokasi berkas .jar nyata di dalam folder apex hasil ekstraksi docker
+            REAL_JAR_PATH=$(find final_rootfs/apex/ -type f -name "$jar" -print -quit 2>/dev/null || true)
+            
+            if [ -n "$REAL_JAR_PATH" ] && [ -f "$REAL_JAR_PATH" ]; then
+              echo "Found $jar at $REAL_JAR_PATH. Copying to framework path..."
+              cp -f "$REAL_JAR_PATH" "final_rootfs/system/framework/$jar"
+            else
+              # Pencarian sekunder jika berada di subfolder lain
+              BACKUP_JAR_PATH=$(find final_rootfs/  -type f -name "$jar" -print -quit 2>/dev/null || true)
+              if [ -n "$BACKUP_JAR_PATH" ] && [ -f "$BACKUP_JAR_PATH" ] && [ "$BACKUP_JAR_PATH" != "final_rootfs/system/framework/$jar" ]; then
+                echo "Found $jar via backup strategy at $BACKUP_JAR_PATH. Copying..."
+                cp -f "$BACKUP_JAR_PATH" "final_rootfs/system/framework/$jar"
+              else
+                echo "WARNING: Physical jar $jar not found! Creating fallback placeholder for VFS inode table."
+                touch "final_rootfs/system/framework/$jar"
+              fi
+            fi
+          done
+
+          # 8. Penegakan Hak Akses Sistem (Aman dari folder yang hilang)
+          echo "Applying Strict Android Permissions..."
+          
+          # Pastikan seluruh struktur folder mutlak dimiliki oleh root sebelum kompilasi SquashFS
+          chown -R root:root final_rootfs/
+
+          # Izin dasar untuk direktori utama sistem
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/etc" ] && find final_rootfs/system/etc -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type d -exec chmod 755 {} + || true
+          [ -d "final_rootfs/system/framework" ] && find final_rootfs/system/framework -type d -exec chmod 755 {} + || true
+
+          # Kunci seluruh executable biner yang ada di system/bin
+          [ -d "final_rootfs/system/bin" ] && find final_rootfs/system/bin -type f -exec chmod 755 {} + || true
+          if [ -f "final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64" ]; then
+            chmod 755 final_rootfs/system/bin/ndk_translation_program_runner_binfmt_misc_arm64
+          fi
+
+          # Mengunci berkas konfigurasi di dalam etc/init jika eksis
+          if [ -d "final_rootfs/system/etc/init" ]; then
+            find final_rootfs/system/etc/init -type f -exec chmod 644 {} + || true
+            [ -f "final_rootfs/system/etc/init/ndk_translation.rc" ] && chmod 644 final_rootfs/system/etc/init/ndk_translation.rc || true
+          fi
+          
+          # Mengunci berkas binfmt_misc jika direktori eksis
+          if [ -d "final_rootfs/system/etc/binfmt_misc" ]; then
+            find final_rootfs/system/etc/binfmt_misc -type f -exec chmod 644 {} + || true
+          fi
+          
+          # Amankan berkas prop sistem dan berkas jar yang baru disalin
+          chmod 644 $BUILD_PROP_PATH
+          [ -d "final_rootfs/system/framework" ] && find final_rootfs/system/framework -type f -exec chmod 644 {} + || true
+
+          # Mengunci seluruh pustaka bersama (.so) secara kondisional
+          [ -d "final_rootfs/system/lib" ] && find final_rootfs/system/lib -type f -name "*.so" -exec chmod 644 {} + || true
+          [ -d "final_rootfs/system/lib64" ] && find final_rootfs/system/lib64 -type f -name "*.so" -exec chmod 644 {} + || true
+          
+          # Pembuatan folder runtime dasar
+          mkdir -p final_rootfs/data final_rootfs/dev final_rootfs/proc final_rootfs/sys
+          EOF
+
+      # 9. INTEGRASI METADATA GENERATOR (Konsep VFS Superblock vPhoneOS)
+      - name: Generate Superblock Index and Flat ROM Archive
+        run: |
+          python3 - << 'EOF'
+          import os
+          import struct
+          import sys
+
+          # Format biner C++: char file_path[256] (256 bytes), uint64_t offset (8 bytes), uint64_t size (8 bytes)
+          # Total ukuran satu baris data struct = 272 bytes
+          STRUCT_FORMAT = "<256sQQ"
+          
+          rootfs_dir = "final_rootfs"
+          output_rom = "readonly.bin"
+          output_sb = "superblock.bin"
+          files_to_pack = []
+
+          # Direktori internal system & vendor yang akan diindeks
+          dirs_to_scan = ["system", "vendor"]
+
+          print("=========================================================")
+          print("[*] Memulai pemindaian rootfs untuk pembuatan Superblock...")
+          
+          for d in dirs_to_scan:
+              target_path = os.path.join(rootfs_dir, d)
+              if not os.path.exists(target_path):
+                  continue
+              for root, _, filenames in os.walk(target_path):
+                  for filename in filenames:
+                      full_path = os.path.join(root, filename)
+                      # Lewati symlink agar tidak memicu duplikasi data
+                      if os.path.islink(full_path):
+                          continue
+                      
+                      rel_path = os.path.relpath(full_path, rootfs_dir)
+                      virtual_path = "/" + rel_path.replace("\\", "/")
+                      files_to_pack.append((full_path, virtual_path))
+
+          print(f"[*] Menemukan {len(files_to_pack)} berkas unik. Mulai menulis arsip biner...")
+          
+          current_offset = 0
+          with open(output_rom, "wb") as rom_file, open(output_sb, "wb") as sb_file:
+              for full_path, virtual_path in files_to_pack:
+                  try:
+                      file_size = os.path.getsize(full_path)
+                      
+                      # Tulis raw binary data langsung ke readonly.bin
+                      with open(full_path, "rb") as f:
+                          rom_file.write(f.read())
+                      
+                      # Batasi path maksimal 255 karakter untuk null terminator keamanan string C++
+                      encoded_path = virtual_path.encode('utf-8')[:255]
+                      padded_path = encoded_path.ljust(256, b'\x00')
+                      
+                      # Pack ke format struct biner
+                      sb_entry = struct.pack(STRUCT_FORMAT, padded_path, current_offset, file_size)
+                      sb_file.write(sb_entry)
+                      
+                      current_offset += file_size
+                  except Exception as e:
+                      print(f"[!] Gagal mengemas berkas {virtual_path}: {e}")
+
+          print("[+] SUCCESS: vMeer ROM Metadata built successfully!")
+          print(f"    - Total ukuran ROM: {current_offset} bytes")
+          print("=========================================================")
+          EOF
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vMeer-ROM-Metadata-${{ github.event.inputs.target_arch }}
+          path: |
+            readonly.bin
+            superblock.bin
