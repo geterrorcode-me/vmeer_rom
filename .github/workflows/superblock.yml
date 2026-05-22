@@ -82,21 +82,32 @@ jobs:
             setfiles -v -r final_rootfs/ final_rootfs/file_contexts.bin final_rootfs/ 2>/dev/null || true
           fi
 
-          # 7.5. Runtime Framework Hard-Copy Fix
+          # 7.5. Runtime Framework Hard-Copy Fix (Diberikan pengaman deteksi file mandiri)
           echo "Injecting physical Java Framework jars into conventional system path..."
           mkdir -p final_rootfs/system/framework
           
           JAR_FILES=("core-oj.jar" "core-libart.jar" "ext.jar" "framework.jar" "services.jar")
           for jar in "${JAR_FILES[@]}"; do
+            TARGET_JAR_PATH="final_rootfs/system/framework/$jar"
             REAL_JAR_PATH=$(find final_rootfs/apex/ -type f -name "$jar" -print -quit 2>/dev/null || true)
+            
             if [ -n "$REAL_JAR_PATH" ] && [ -f "$REAL_JAR_PATH" ]; then
-              cp -f "$REAL_JAR_PATH" "final_rootfs/system/framework/$jar"
+              if [ "$REAL_JAR_PATH" != "$TARGET_JAR_PATH" ]; then
+                cp -f "$REAL_JAR_PATH" "$TARGET_JAR_PATH"
+              fi
             else
               BACKUP_JAR_PATH=$(find final_rootfs/ -type f -name "$jar" -print -quit 2>/dev/null || true)
               if [ -n "$BACKUP_JAR_PATH" ] && [ -f "$BACKUP_JAR_PATH" ]; then
-                cp -f "$BACKUP_JAR_PATH" "final_rootfs/system/framework/$jar"
+                # PERBAIKAN: Hanya lakukan copy jika file sumber berbeda dengan file target
+                if [ "$BACKUP_JAR_PATH" != "$TARGET_JAR_PATH" ]; then
+                  echo "Copying $jar from backup source: $BACKUP_JAR_PATH"
+                  cp -f "$BACKUP_JAR_PATH" "$TARGET_JAR_PATH"
+                else
+                  echo "$jar sudah berada di posisi yang tepat. Melewati penyalinan mandiri."
+                fi
               else
-                touch "final_rootfs/system/framework/$jar"
+                echo "Warning: $jar tidak ditemukan sama sekali. Membuat file penanda kosong."
+                touch "$TARGET_JAR_PATH"
               fi
             fi
           done
@@ -172,7 +183,6 @@ jobs:
       - name: Compress ROM Package with 7-Zip (Ultra LZMA2)
         run: |
           echo "[*] Mengompresi database ROM vMeer ke format 7z..."
-          # Menggunakan 7-Zip dengan kompresi ultra LZMA2 (-mx=9) untuk merapatkan file hingga sekecil mungkin
           7z a -t7z -m0=lzma2 -mx=9 -ms=on readonly.7z readonly.bin superblock.bin
           echo "[+] Kompresi selesai. File readonly.7z siap dikemas dalam assets!"
 
